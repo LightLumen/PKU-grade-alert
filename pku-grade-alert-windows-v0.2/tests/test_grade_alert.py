@@ -1,3 +1,4 @@
+import queue
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from grade_alert import (  # noqa: E402
     send_serverchan,
 )
 from local_secrets import delete_credentials, load_credentials, save_credentials  # noqa: E402
+from grade_alert_gui import QueueWriter  # noqa: E402
 
 
 class NormalizeCoursesTests(unittest.TestCase):
@@ -171,6 +173,22 @@ class LocalSecretTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
 
+class PersistentLogTests(unittest.TestCase):
+    def test_queue_writer_appends_local_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            messages: queue.Queue[str] = queue.Queue()
+            log_path = Path(directory) / "grade_alert.log"
+            writer = QueueWriter(messages, log_path)
+
+            writer.write("sanitized test message\n")
+
+            self.assertEqual(messages.get_nowait(), "sanitized test message\n")
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                "sanitized test message\n",
+            )
+
+
 class AutoLoginTests(unittest.TestCase):
     class FakeLocator:
         def __init__(self, page, selector, visible=True):
@@ -197,24 +215,37 @@ class AutoLoginTests(unittest.TestCase):
             return self.checked
 
         def check(self, force=False):
+            if not self.visible:
+                raise RuntimeError("hidden checkbox cannot be clicked")
+            self.checked = True
+
+        def evaluate(self, script):
             self.checked = True
 
         def inner_text(self):
             return ""
 
     class FakePage:
-        def __init__(self, login_succeeds=True, otp_visible=True):
+        def __init__(
+            self,
+            login_succeeds=True,
+            otp_visible=True,
+            navigation_evaluate_failures=0,
+        ):
             self.url = "https://treehole.pku.edu.cn/web/webscore"
             self.login_succeeds = login_succeeds
+            self.navigation_evaluate_failures = navigation_evaluate_failures
             self.locators = {}
             for selector in (
                 "#user_name",
                 "#password",
                 "#logon_button",
-                "#remTrust_check",
                 "#msg",
             ):
                 self.locators[selector] = AutoLoginTests.FakeLocator(self, selector)
+            self.locators["#remTrust_check"] = AutoLoginTests.FakeLocator(
+                self, "#remTrust_check", visible=False
+            )
             self.locators["#otp_code"] = AutoLoginTests.FakeLocator(
                 self, "#otp_code", visible=otp_visible
             )
@@ -227,6 +258,11 @@ class AutoLoginTests(unittest.TestCase):
 
         def evaluate(self, script, value=None):
             if script.strip().startswith("() => localStorage.getItem"):
+                if self.navigation_evaluate_failures:
+                    self.navigation_evaluate_failures -= 1
+                    raise RuntimeError(
+                        "Execution context was destroyed, most likely because of a navigation"
+                    )
                 return "Web_PKUHOLE_2.0.0_WEB_UUID_test"
             return {
                 "kind": "response",
@@ -271,6 +307,18 @@ class AutoLoginTests(unittest.TestCase):
         page = self.FakePage(login_succeeds=False, otp_visible=True)
         with self.assertRaises(SecondFactorRequired):
             auto_login_treehole(page, "student-id", "password-value")
+
+    def test_auto_login_retries_uuid_read_after_navigation(self):
+        page = self.FakePage(
+            login_succeeds=True,
+            otp_visible=False,
+            navigation_evaluate_failures=1,
+        )
+
+        payload = auto_login_treehole(page, "student-id", "password-value")
+
+        self.assertIn("score", payload["data"])
+        self.assertEqual(page.navigation_evaluate_failures, 0)
 
 
 if __name__ == "__main__":

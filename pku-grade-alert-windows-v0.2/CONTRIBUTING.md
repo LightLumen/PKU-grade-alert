@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢参与改进。本项目当前只接受 Windows 10/11 适配，提交前请遵循以下规则。
+感谢阳阳咪和良爷参与改进。本项目当前只接受 Windows 10/11 适配，提交前请遵循以下规则。
 
 ## 隐私与测试数据
 
@@ -15,7 +15,7 @@
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m py_compile grade_alert.py grade_alert_gui.py environment_check.py local_secrets.py
+.\.venv\Scripts\python.exe -m py_compile grade_alert.py grade_alert_gui.py launch_gui.pyw environment_check.py local_secrets.py
 ```
 
 涉及 GUI 的改动还应运行：

@@ -88,9 +88,11 @@
 - `credentials.dat`：DPAPI 加密账号密码
 - `config.local.json`：本地设置与 Server酱 SendKey
 - `data/last_scores.json`：真实课程与成绩基线
+- `data/grade_alert.log`：本地运行日志，最多保留当前与上一份日志
+- `data/launcher.log`：双击启动时选择的虚拟环境、解释器及启动异常
 - `.venv/`：本地 Python 虚拟环境
 
-`data/diagnostics.json` 虽经过脱敏，也默认不进入版本控制。提交 Issue 前仍应自行检查内容。
+`data/diagnostics.json` 虽经过脱敏，运行日志也不会主动记录密码、Cookie 或 SendKey，但它们都默认不进入版本控制。提交 Issue 前仍应自行检查内容。
 
 ## 卸载
 
@@ -116,7 +118,7 @@
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m py_compile grade_alert.py grade_alert_gui.py environment_check.py local_secrets.py
+.\.venv\Scripts\python.exe -m py_compile grade_alert.py grade_alert_gui.py launch_gui.pyw environment_check.py local_secrets.py
 ```
 
 测试不得使用真实账号、密码、SendKey、Cookie 或成绩数据。贡献说明见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。

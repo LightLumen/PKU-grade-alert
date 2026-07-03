@@ -8,6 +8,7 @@
 - Cookie、`pku_token` 或 `.browser-profile` 内容
 - Server酱 SendKey
 - `config.local.json`、`credentials.dat` 或 `data/last_scores.json`
+- 未经人工检查的 `data/grade_alert.log` 或 `data/launcher.log`
 - 含真实课程、教师或成绩的信息
 
 如果敏感信息已经公开，请先删除公开内容，并立即修改密码、撤销 SendKey 或使相关会话失效。仅删除 GitHub 页面上的文本不能保证信息从历史记录或第三方缓存中消失。

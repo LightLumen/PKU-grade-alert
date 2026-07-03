@@ -32,6 +32,7 @@ STATE_PATH = DATA_DIR / "last_scores.json"
 DIAGNOSTICS_PATH = DATA_DIR / "diagnostics.json"
 
 WEB_SCORE_URL = "https://treehole.pku.edu.cn/web/webscore"
+TREEHOLE_HOME_URL = "https://treehole.pku.edu.cn/web"
 TREEHOLE_LOGIN_URL = "https://treehole.pku.edu.cn/redirect_iaaa_login"
 AUTH_CODES = {40002, 40008, 40009, 40010, 40077, 40088, 40099}
 
@@ -139,6 +140,11 @@ def _locator_visible(page: Any, selector: str) -> bool:
     return locator.count() == 1 and locator.is_visible()
 
 
+def _navigation_destroyed_context(error: BaseException) -> bool:
+    message = str(error).lower()
+    return "execution context was destroyed" in message and "navigation" in message
+
+
 def auto_login_treehole(
     page: Any,
     username: str,
@@ -161,13 +167,31 @@ def auto_login_treehole(
     if not username or not password:
         raise GradeAlertError("自动登录需要账号和密码")
 
-    pku_uuid = page.evaluate("() => localStorage.getItem('pku-uuid')")
-    if not pku_uuid:
-        pku_uuid = f"Web_PKUHOLE_2.0.0_WEB_UUID_{uuid.uuid4()}"
-        page.evaluate(
-            "value => localStorage.setItem('pku-uuid', value)",
-            pku_uuid,
-        )
+    generated_uuid = f"Web_PKUHOLE_2.0.0_WEB_UUID_{uuid.uuid4()}"
+    pku_uuid = generated_uuid
+    try:
+        page.goto(TREEHOLE_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+    except PlaywrightTimeoutError:
+        pass
+
+    for attempt in range(3):
+        try:
+            stored_uuid = page.evaluate("() => localStorage.getItem('pku-uuid')")
+            if stored_uuid:
+                pku_uuid = stored_uuid
+            else:
+                page.evaluate(
+                    "value => localStorage.setItem('pku-uuid', value)",
+                    generated_uuid,
+                )
+            break
+        except Exception as error:
+            if not _navigation_destroyed_context(error):
+                raise LoginRequired("树洞页面尚未准备好，无法开始统一认证") from error
+            if attempt < 2:
+                page.wait_for_timeout(500)
+    # A fresh UUID is sufficient for the redirect when repeated navigation
+    # prevents localStorage from being read. The next stable page persists it.
     login_url = TREEHOLE_LOGIN_URL + "?" + urllib.parse.urlencode({"uuid": pku_uuid})
     page.goto(login_url, wait_until="domcontentloaded", timeout=60_000)
 
@@ -194,7 +218,16 @@ def auto_login_treehole(
     if trust_device:
         trust = page.locator("#remTrust_check")
         if trust.count() == 1 and not trust.is_checked():
-            trust.check(force=True)
+            # IAAA visually replaces this native checkbox and keeps the input
+            # hidden. Set its state in the DOM so Playwright does not try to
+            # scroll or click an element that has no visible box.
+            trust.evaluate(
+                """element => {
+                    element.checked = true;
+                    element.dispatchEvent(new Event("input", {bubbles: true}));
+                    element.dispatchEvent(new Event("change", {bubbles: true}));
+                }"""
+            )
 
     page.locator("#logon_button").click()
 
@@ -261,12 +294,26 @@ async () => {
 
 
 def fetch_score_payload(page: Any) -> dict[str, Any]:
-    try:
-        result = page.evaluate(FETCH_SCORE_SCRIPT)
-    except Exception as error:
-        raise ScoreResponseError(
-            "浏览器中的成绩请求执行失败，请检查网络后重试；必要时使用 check --headed 排查"
-        ) from error
+    result: Any = None
+    for attempt in range(2):
+        try:
+            result = page.evaluate(FETCH_SCORE_SCRIPT)
+            break
+        except Exception as error:
+            if _navigation_destroyed_context(error) and attempt == 0:
+                try:
+                    page.goto(
+                        WEB_SCORE_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+                continue
+            raise ScoreResponseError(
+                "浏览器中的成绩请求执行失败，请检查网络后重试；必要时使用 check --headed 排查"
+            ) from error
     if not isinstance(result, dict):
         raise ScoreResponseError("浏览器没有返回可识别的查询结果")
     if result.get("kind") == "auth_missing":

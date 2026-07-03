@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Any, Callable
 
@@ -41,15 +42,46 @@ from local_secrets import (
 
 
 CREDENTIALS_PATH = APP_DIR / "credentials.dat"
+LOG_PATH = APP_DIR / "data" / "grade_alert.log"
+LOG_LIMIT_BYTES = 1_000_000
 
 
 class QueueWriter(io.TextIOBase):
-    def __init__(self, messages: queue.Queue[str]) -> None:
+    def __init__(
+        self,
+        messages: queue.Queue[str],
+        log_path: Path | None = None,
+    ) -> None:
         self.messages = messages
+        self.log_path = log_path
+        self.log_lock = threading.Lock()
+
+    def _append_log(self, value: str) -> None:
+        if self.log_path is None:
+            return
+        try:
+            with self.log_lock:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                if (
+                    self.log_path.exists()
+                    and self.log_path.stat().st_size >= LOG_LIMIT_BYTES
+                ):
+                    backup = self.log_path.with_name(
+                        f"{self.log_path.stem}.1{self.log_path.suffix}"
+                    )
+                    if backup.exists():
+                        backup.unlink()
+                    self.log_path.replace(backup)
+                with self.log_path.open("a", encoding="utf-8") as file:
+                    file.write(value)
+        except OSError:
+            # Logging must never stop grade monitoring.
+            return
 
     def write(self, value: str) -> int:
         if value:
             self.messages.put(value)
+            self._append_log(value)
         return len(value)
 
     def flush(self) -> None:
@@ -186,7 +218,7 @@ class GradeAlertApp:
             init_config()
         self.config = load_config()
         self.messages: queue.Queue[str] = queue.Queue()
-        self.writer = QueueWriter(self.messages)
+        self.writer = QueueWriter(self.messages, LOG_PATH)
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.active_task: str | None = None
@@ -239,6 +271,7 @@ class GradeAlertApp:
         self.root.after(100, self._drain_messages)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.log("界面已就绪。第一次使用可手动登录，或在“自动登录”页完成本机设置。")
+        self.log(f"运行日志保存在本机：{LOG_PATH}")
         if credential_load_error:
             self.log(f"本地登录信息无法读取：{credential_load_error}")
 
@@ -953,24 +986,26 @@ class GradeAlertApp:
         self._run_worker("正在查询", operation)
 
     def start_monitor(self) -> None:
-        config = self.save_settings(quiet=True)
-        if config is None:
+        initial_config = self.save_settings(quiet=True)
+        if initial_config is None:
             messagebox.showerror("设置有误", "请先检查并保存设置。")
             return
-        interval = int(config["poll_seconds"])
+        initial_interval = int(initial_config["poll_seconds"])
 
         def operation() -> None:
-            self.log(f"持续监控已开始，每 {interval // 60} 分钟查询一次。")
-            with browser_page(config, headed=False) as page:
+            self.log(f"持续监控已开始，每 {initial_interval // 60} 分钟查询一次。")
+            with browser_page(initial_config, headed=False) as page:
                 while not self.stop_event.is_set():
+                    current_config = self.config
+                    interval = int(current_config.get("poll_seconds", initial_interval))
                     try:
-                        check_once(page, config)
+                        check_once(page, current_config)
                     except LoginRequired:
                         try:
-                            self._recover_login(page, config)
-                            check_once(page, config)
-                        except LoginRequired as error:
-                            self._notify_login_required(config, error)
+                            self._recover_login(page, current_config)
+                            check_once(page, current_config)
+                        except GradeAlertError as error:
+                            self._notify_login_required(current_config, error)
                             raise
                     except GradeAlertError as error:
                         self.log(f"本轮查询失败：{error}")
