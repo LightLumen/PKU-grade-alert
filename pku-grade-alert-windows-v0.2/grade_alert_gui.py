@@ -30,6 +30,7 @@ from grade_alert import (
     load_config,
     normalize_courses,
     now_text,
+    process_score_payload,
     send_serverchan,
     write_json,
 )
@@ -719,7 +720,7 @@ class GradeAlertApp:
         self.phone_token_entry.configure(show=show)
 
     def log(self, message: str) -> None:
-        self.messages.put(f"[{now_text()}] {message}\n")
+        self.writer.write(f"[{now_text()}] {message}\n")
 
     def _drain_messages(self) -> None:
         chunks: list[str] = []
@@ -883,7 +884,7 @@ class GradeAlertApp:
         self.pending_phone_token = ""
         self.root.after(0, self.phone_token_var.set, "")
 
-    def _recover_login(self, page: Any, config: dict[str, Any]) -> None:
+    def _recover_login(self, page: Any, config: dict[str, Any]) -> dict[str, Any]:
         auto_login = config.get("auto_login", {})
         if not isinstance(auto_login, dict) or not auto_login.get("enabled", False):
             raise LoginRequired("登录已失效，且未启用自动登录")
@@ -908,6 +909,7 @@ class GradeAlertApp:
             self._clear_phone_token()
         courses = normalize_courses(payload)
         self.log(f"自动登录成功，接口返回 {len(courses)} 门课程。")
+        return payload
 
     def _notify_login_required(self, config: dict[str, Any], error: Exception) -> None:
         serverchan = config.get("serverchan", {})
@@ -980,8 +982,8 @@ class GradeAlertApp:
                 try:
                     check_once(page, config, show_courses=True)
                 except LoginRequired:
-                    self._recover_login(page, config)
-                    check_once(page, config, show_courses=True)
+                    payload = self._recover_login(page, config)
+                    process_score_payload(payload, config, show_courses=True)
 
         self._run_worker("正在查询", operation)
 
@@ -994,16 +996,26 @@ class GradeAlertApp:
 
         def operation() -> None:
             self.log(f"持续监控已开始，每 {initial_interval // 60} 分钟查询一次。")
+            previous_cycle_started: float | None = None
             with browser_page(initial_config, headed=False) as page:
                 while not self.stop_event.is_set():
                     current_config = self.config
                     interval = int(current_config.get("poll_seconds", initial_interval))
+                    cycle_started = time.time()
+                    if previous_cycle_started is not None:
+                        elapsed = cycle_started - previous_cycle_started
+                        if elapsed > interval + 120:
+                            self.log(
+                                f"检测到约 {round(elapsed / 60)} 分钟未执行查询，"
+                                "电脑可能刚从睡眠或休眠恢复；现已继续监控。"
+                            )
+                    previous_cycle_started = cycle_started
                     try:
                         check_once(page, current_config)
                     except LoginRequired:
                         try:
-                            self._recover_login(page, current_config)
-                            check_once(page, current_config)
+                            payload = self._recover_login(page, current_config)
+                            process_score_payload(payload, current_config)
                         except GradeAlertError as error:
                             self._notify_login_required(current_config, error)
                             raise

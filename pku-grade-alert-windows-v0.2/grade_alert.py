@@ -145,6 +145,35 @@ def _navigation_destroyed_context(error: BaseException) -> bool:
     return "execution context was destroyed" in message and "navigation" in message
 
 
+def _navigation_was_aborted(error: BaseException) -> bool:
+    return "net::err_aborted" in str(error).lower()
+
+
+def _goto_login_redirect(page: Any, login_url: str) -> None:
+    """Open the IAAA redirect while tolerating an expected cancelled request."""
+
+    for attempt in range(3):
+        try:
+            page.goto(login_url, wait_until="commit", timeout=60_000)
+            return
+        except Exception as error:
+            if not _navigation_was_aborted(error):
+                raise LoginRequired("无法打开北大统一认证入口，请检查网络后重试") from error
+
+            page.wait_for_timeout(700 * (attempt + 1))
+            current_url = str(page.url).lower()
+            if "iaaa.pku.edu.cn" in current_url:
+                return
+            if (
+                "treehole.pku.edu.cn" in current_url
+                and "/redirect_iaaa_login" not in current_url
+                and current_url.rstrip("/") != TREEHOLE_HOME_URL.rstrip("/")
+            ):
+                return
+
+    raise LoginRequired("统一认证跳转连续被浏览器中止，请稍后重新查询")
+
+
 def auto_login_treehole(
     page: Any,
     username: str,
@@ -193,7 +222,7 @@ def auto_login_treehole(
     # A fresh UUID is sufficient for the redirect when repeated navigation
     # prevents localStorage from being read. The next stable page persists it.
     login_url = TREEHOLE_LOGIN_URL + "?" + urllib.parse.urlencode({"uuid": pku_uuid})
-    page.goto(login_url, wait_until="domcontentloaded", timeout=60_000)
+    _goto_login_redirect(page, login_url)
 
     if "treehole.pku.edu.cn" in page.url and "iaaa.pku.edu.cn" not in page.url:
         page.goto(WEB_SCORE_URL, wait_until="domcontentloaded", timeout=60_000)
@@ -473,8 +502,13 @@ def state_from_courses(courses: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def check_once(page: Any, config: dict[str, Any], show_courses: bool = False) -> int:
-    payload = fetch_score_payload(page)
+def process_score_payload(
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    show_courses: bool = False,
+) -> int:
+    """Process an already fetched score response without issuing another request."""
+
     courses = normalize_courses(payload)
     current_state = state_from_courses(courses)
     current = current_state["courses"]
@@ -514,6 +548,11 @@ def check_once(page: Any, config: dict[str, Any], show_courses: bool = False) ->
     write_json(STATE_PATH, current_state)
     print(f"[{now_text()}] 查询成功，共 {len(courses)} 门课程，没有发现成绩变化。")
     return 0
+
+
+def check_once(page: Any, config: dict[str, Any], show_courses: bool = False) -> int:
+    payload = fetch_score_payload(page)
+    return process_score_payload(payload, config, show_courses=show_courses)
 
 
 def type_name(value: Any) -> str:

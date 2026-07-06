@@ -15,13 +15,14 @@ from grade_alert import (  # noqa: E402
     build_message,
     detect_changes,
     normalize_courses,
+    process_score_payload,
     auto_login_treehole,
     SecondFactorRequired,
     TREEHOLE_LOGIN_URL,
     send_serverchan,
 )
 from local_secrets import delete_credentials, load_credentials, save_credentials  # noqa: E402
-from grade_alert_gui import QueueWriter  # noqa: E402
+from grade_alert_gui import GradeAlertApp, QueueWriter  # noqa: E402
 
 
 class NormalizeCoursesTests(unittest.TestCase):
@@ -114,6 +115,32 @@ class ChangeDetectionTests(unittest.TestCase):
         self.assertNotIn("95", content)
         self.assertIn("成绩已更新", content)
 
+    def test_processes_existing_payload_without_fetching(self):
+        payload = {
+            "data": {
+                "score": {
+                    "success": True,
+                    "xslb": "bk",
+                    "cjxx": [
+                        {
+                            "kch": "LAW002",
+                            "kcmc": "已有响应课程",
+                            "xnd": "2025",
+                            "xq": "2",
+                            "xqcj": "P",
+                        }
+                    ],
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "last_scores.json"
+            with patch("grade_alert.STATE_PATH", state_path):
+                result = process_score_payload(payload, {"notify_on_first_run": False})
+
+            self.assertEqual(result, 0)
+            self.assertTrue(state_path.exists())
+
 
 class DiagnosticsTests(unittest.TestCase):
     def test_diagnostics_contains_types_not_values(self):
@@ -188,6 +215,21 @@ class PersistentLogTests(unittest.TestCase):
                 "sanitized test message\n",
             )
 
+    def test_gui_status_log_is_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            messages: queue.Queue[str] = queue.Queue()
+            log_path = Path(directory) / "grade_alert.log"
+            app = GradeAlertApp.__new__(GradeAlertApp)
+            app.messages = messages
+            app.writer = QueueWriter(messages, log_path)
+
+            with patch("grade_alert_gui.now_text", return_value="2026-07-04T12:00:00+08:00"):
+                app.log("持续监控已开始")
+
+            persisted = log_path.read_text(encoding="utf-8")
+            self.assertIn("持续监控已开始", persisted)
+            self.assertEqual(messages.get_nowait(), persisted)
+
 
 class AutoLoginTests(unittest.TestCase):
     class FakeLocator:
@@ -231,10 +273,12 @@ class AutoLoginTests(unittest.TestCase):
             login_succeeds=True,
             otp_visible=True,
             navigation_evaluate_failures=0,
+            login_redirect_aborts=0,
         ):
             self.url = "https://treehole.pku.edu.cn/web/webscore"
             self.login_succeeds = login_succeeds
             self.navigation_evaluate_failures = navigation_evaluate_failures
+            self.login_redirect_aborts = login_redirect_aborts
             self.locators = {}
             for selector in (
                 "#user_name",
@@ -273,6 +317,11 @@ class AutoLoginTests(unittest.TestCase):
         def goto(self, url, **kwargs):
             if url.startswith(TREEHOLE_LOGIN_URL):
                 self.url = "https://iaaa.pku.edu.cn/iaaa/oauth.jsp?appID=PKU%20Helper"
+                if self.login_redirect_aborts:
+                    self.login_redirect_aborts -= 1
+                    raise RuntimeError(
+                        "Page.goto: net::ERR_ABORTED at redirect_iaaa_login"
+                    )
             else:
                 self.url = url
 
@@ -319,6 +368,18 @@ class AutoLoginTests(unittest.TestCase):
 
         self.assertIn("score", payload["data"])
         self.assertEqual(page.navigation_evaluate_failures, 0)
+
+    def test_auto_login_accepts_aborted_request_after_iaaa_redirect(self):
+        page = self.FakePage(
+            login_succeeds=True,
+            otp_visible=False,
+            login_redirect_aborts=1,
+        )
+
+        payload = auto_login_treehole(page, "student-id", "password-value")
+
+        self.assertIn("score", payload["data"])
+        self.assertEqual(page.login_redirect_aborts, 0)
 
 
 if __name__ == "__main__":
