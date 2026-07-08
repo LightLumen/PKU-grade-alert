@@ -35,6 +35,10 @@ WEB_SCORE_URL = "https://treehole.pku.edu.cn/web/webscore"
 TREEHOLE_HOME_URL = "https://treehole.pku.edu.cn/web"
 TREEHOLE_LOGIN_URL = "https://treehole.pku.edu.cn/redirect_iaaa_login"
 AUTH_CODES = {40002, 40008, 40009, 40010, 40077, 40088, 40099}
+AUTH_ERROR_MESSAGES = (
+    "访问参数已失效",
+    "应用未被授权允许访问服务",
+)
 
 
 class GradeAlertError(RuntimeError):
@@ -143,6 +147,11 @@ def _locator_visible(page: Any, selector: str) -> bool:
 def _navigation_destroyed_context(error: BaseException) -> bool:
     message = str(error).lower()
     return "execution context was destroyed" in message and "navigation" in message
+
+
+def _looks_like_auth_error(message: Any) -> bool:
+    text = str(message or "")
+    return any(fragment in text for fragment in AUTH_ERROR_MESSAGES)
 
 
 def _navigation_was_aborted(error: BaseException) -> bool:
@@ -354,8 +363,11 @@ def fetch_score_payload(page: Any) -> dict[str, Any]:
     if status != 200 or not isinstance(body, dict):
         raise ScoreResponseError(f"成绩接口返回 HTTP {status}")
     code = body.get("code")
+    message = body.get("message") or body.get("msg") or body.get("errMsg")
     if code in AUTH_CODES:
         raise LoginRequired(f"平台要求额外身份验证（接口代码 {code}），请运行 login 命令")
+    if _looks_like_auth_error(message):
+        raise LoginRequired(str(message))
     return body
 
 
@@ -375,6 +387,8 @@ def normalize_courses(payload: dict[str, Any]) -> list[dict[str, Any]]:
         raise ScoreResponseError("响应中缺少 data.score 对象")
     if score_data.get("success") is False:
         message = score_data.get("errMsg") or payload.get("message") or "成绩查询失败"
+        if _looks_like_auth_error(message):
+            raise LoginRequired(str(message))
         raise ScoreResponseError(str(message))
 
     graduate = score_data.get("xslb") == "yjs"

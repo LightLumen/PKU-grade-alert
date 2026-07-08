@@ -14,6 +14,8 @@ from grade_alert import (  # noqa: E402
     build_diagnostics,
     build_message,
     detect_changes,
+    fetch_score_payload,
+    LoginRequired,
     normalize_courses,
     process_score_payload,
     auto_login_treehole,
@@ -81,6 +83,33 @@ class NormalizeCoursesTests(unittest.TestCase):
         self.assertEqual(course["score"], "92")
         self.assertEqual(course["type"], "学位课")
         self.assertTrue(course["graduate"])
+
+    def test_access_parameter_error_requires_login_from_score_body(self):
+        payload = {
+            "data": {
+                "score": {
+                    "success": False,
+                    "errMsg": "访问参数已失效",
+                }
+            }
+        }
+
+        with self.assertRaises(LoginRequired):
+            normalize_courses(payload)
+
+
+class FetchScoreTests(unittest.TestCase):
+    class FakePage:
+        def evaluate(self, script):
+            return {
+                "kind": "response",
+                "status": 200,
+                "body": {"code": 1, "message": "访问参数已失效"},
+            }
+
+    def test_access_parameter_error_requires_login_from_api_body(self):
+        with self.assertRaises(LoginRequired):
+            fetch_score_payload(self.FakePage())
 
 
 class ChangeDetectionTests(unittest.TestCase):

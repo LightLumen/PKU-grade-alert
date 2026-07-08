@@ -911,6 +911,21 @@ class GradeAlertApp:
         self.log(f"自动登录成功，接口返回 {len(courses)} 门课程。")
         return payload
 
+    def _process_recovered_payload(
+        self,
+        page: Any,
+        payload: dict[str, Any],
+        config: dict[str, Any],
+        show_courses: bool = False,
+    ) -> None:
+        try:
+            process_score_payload(payload, config, show_courses=show_courses)
+        except LoginRequired as error:
+            self.log(f"自动登录返回的访问参数已失效，等待 3 秒后重新读取成绩：{error}")
+            page.wait_for_timeout(3000)
+            fresh_payload = fetch_score_payload(page)
+            process_score_payload(fresh_payload, config, show_courses=show_courses)
+
     def _notify_login_required(self, config: dict[str, Any], error: Exception) -> None:
         serverchan = config.get("serverchan", {})
         if not isinstance(serverchan, dict) or not serverchan.get("enabled", False):
@@ -983,7 +998,12 @@ class GradeAlertApp:
                     check_once(page, config, show_courses=True)
                 except LoginRequired:
                     payload = self._recover_login(page, config)
-                    process_score_payload(payload, config, show_courses=True)
+                    self._process_recovered_payload(
+                        page,
+                        payload,
+                        config,
+                        show_courses=True,
+                    )
 
         self._run_worker("正在查询", operation)
 
@@ -1015,7 +1035,7 @@ class GradeAlertApp:
                     except LoginRequired:
                         try:
                             payload = self._recover_login(page, current_config)
-                            process_score_payload(payload, current_config)
+                            self._process_recovered_payload(page, payload, current_config)
                         except GradeAlertError as error:
                             self._notify_login_required(current_config, error)
                             raise
